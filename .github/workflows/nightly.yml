@@ -57,7 +57,7 @@ jobs:
         run: printf 'help\nexit\n' | .build/debug/proxmoxctl interactive
 
       - name: Upload toolchain report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: toolchain-report-${{ matrix.runner }}
           path: toolchain-report-${{ matrix.runner }}.txt
