@@ -10,6 +10,12 @@ build, test, and run path. Xcode may be used as a toolchain provider, but the
 repo should not grow an Xcode project without a concrete app-bundle or
 distribution requirement.
 
+## macOS 26 Minimum
+
+The package minimum is macOS 26. The primary use case is running this tool on a
+current personal Mac, so CI targets `macos-26` instead of preserving older macOS
+compatibility by default.
+
 ## API Tokens Instead Of Password Auth
 
 The CLI uses Proxmox API tokens and sends `PVEAPIToken=<tokenID>=<secret>`.

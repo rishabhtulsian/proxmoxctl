@@ -19,7 +19,7 @@ The CLI currently supports:
 
 ## Requirements
 
-- macOS 13 or newer.
+- macOS 26 or newer.
 - Xcode or Xcode Command Line Tools with Swift 6.
 - Network access to a Proxmox VE API endpoint.
 - A Proxmox API token with permissions for the commands you intend to run.

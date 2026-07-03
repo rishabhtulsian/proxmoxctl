@@ -29,6 +29,17 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 
 The script builds with SwiftPM, resolves the debug binary path, and runs the CLI.
 
+## GitHub Actions
+
+Primary CI runs on `macos-26` because the package minimum is macOS 26 and the
+primary use case is current-macOS personal use. `macos-latest` is reserved for
+nightly drift checks that detect future GitHub-hosted runner, Xcode, and Swift
+toolchain changes.
+
+GitHub-hosted workflows must not use secrets, live Proxmox endpoints, or guest
+lifecycle commands. Keep CI limited to build, test, local CLI verification, and
+piped interactive smoke tests.
+
 ## Test Categories
 
 - Config and credential normalization.

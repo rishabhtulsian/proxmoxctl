@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "proxmoxctl",
     platforms: [
-        .macOS(.v13)
+        .macOS("26.0")
     ],
     products: [
         .executable(name: "proxmoxctl", targets: ["proxmoxctl"]),

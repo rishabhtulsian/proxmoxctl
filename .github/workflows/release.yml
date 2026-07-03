@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build release artifact
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Print toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version
+
+      - name: Build release binary
+        run: swift build -c release
+
+      - name: Package artifact
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          ARCH="$(uname -m)"
+          NAME="proxmoxctl-${TAG}-macos26-${ARCH}"
+          BIN="$(swift build -c release --show-bin-path)/proxmoxctl"
+
+          mkdir -p "dist/${NAME}"
+          cp "$BIN" "dist/${NAME}/proxmoxctl"
+          cp README.md LICENSE "dist/${NAME}/"
+          chmod 0755 "dist/${NAME}/proxmoxctl"
+
+          tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"
+          (cd dist && shasum -a 256 "${NAME}.tar.gz" > SHA256SUMS)
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS \
+              --title "$TAG" \
+              --notes "Release $TAG"
+          fi
