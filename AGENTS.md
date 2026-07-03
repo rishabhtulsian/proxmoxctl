@@ -11,6 +11,8 @@ project's safety and security constraints before optimizing for speed.
 - Prefer small, test-backed changes over broad rewrites.
 - Keep SwiftPM as the build system. Do not add an Xcode project unless the user
   explicitly asks for app-bundle behavior or Xcode-only distribution.
+- Use `macos-26` as the primary GitHub Actions runner. Use `macos-latest` only
+  for scheduled drift checks.
 - Update docs when command behavior, auth behavior, config shape, safety policy,
   or developer workflow changes.
 
