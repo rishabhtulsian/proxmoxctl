@@ -1,0 +1,5 @@
+module CEditLine [system] {
+    header "include/CEditLine.h"
+    link "readline"
+    export *
+}
