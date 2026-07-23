@@ -1,0 +1,63 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 10 1 1,7 *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: Drift check (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-26
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Write toolchain report
+        run: |
+          REPORT="toolchain-report-${{ matrix.runner }}.txt"
+          {
+            echo "# Toolchain report"
+            echo
+            echo "Runner: ${{ matrix.runner }}"
+            echo
+            echo "## macOS"
+            sw_vers
+            echo
+            echo "## Swift"
+            swift --version
+            echo
+            echo "## Xcode"
+            xcodebuild -version
+          } | tee "$REPORT"
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Verify CLI
+        run: ./script/build_and_run.sh --verify
+
+      - name: Interactive pipe smoke
+        run: printf 'help\nexit\n' | .build/debug/proxmoxctl interactive
+
+      - name: Upload toolchain report
+        uses: actions/upload-artifact@v7
+        with:
+          name: toolchain-report-${{ matrix.runner }}
+          path: toolchain-report-${{ matrix.runner }}.txt
