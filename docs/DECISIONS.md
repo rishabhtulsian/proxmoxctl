@@ -35,6 +35,14 @@ Users can configure multiple hosts. Commands accept `--host <alias>` and
 otherwise use the selected default host. Host aliases are the keys for config,
 Keychain entries, and interactive caches.
 
+## One Global Request-Level API Timeout
+
+`apiTimeoutSeconds` is global across configured hosts because timeout behavior is
+a CLI transport policy rather than host identity. Missing values default to 5
+seconds for backward compatibility. `ProxmoxClient` assigns the effective value
+to every `URLRequest`, covering all GET and POST API operations through one
+central request-construction path.
+
 ## Session-Only Interactive Caches
 
 Interactive mode caches secrets and node lists only in memory for the lifetime

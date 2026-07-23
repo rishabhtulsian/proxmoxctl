@@ -34,6 +34,7 @@ case "$MODE" in
   --verify|verify)
     "$APP_BINARY" --help >/dev/null
     echo "Verified $APP_NAME help"
+    "$ROOT_DIR/script/test_config_timeout.sh" "$APP_BINARY"
     ;;
   *)
     echo "usage: $0 [run|--debug|--logs|--telemetry|--verify] [proxmoxctl args...]" >&2

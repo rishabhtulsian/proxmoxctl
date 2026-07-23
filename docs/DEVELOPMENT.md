@@ -29,6 +29,15 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 
 The script builds with SwiftPM, resolves the debug binary path, and runs the CLI.
 
+To smoke-test timeout persistence without contacting a Proxmox host:
+
+```bash
+TEMP_DIR="$(mktemp -d)"
+TEMP_CONFIG="$TEMP_DIR/config.json"
+.build/debug/proxmoxctl config set-timeout 10 --config "$TEMP_CONFIG"
+/usr/bin/plutil -p "$TEMP_CONFIG"
+```
+
 ## GitHub Actions
 
 Primary CI runs on `macos-26` because the package minimum is macOS 26 and the
@@ -52,6 +61,9 @@ piped interactive smoke tests.
 - JSON/table rendering.
 - Confirmation policy for disruptive commands.
 - Interactive parser, loop behavior, session cache, and history policy.
+- API timeout defaulting, validation, persistence, and request propagation.
+- Built-CLI `config set-timeout` behavior through
+  `script/test_config_timeout.sh`.
 
 Add focused tests for each behavior change. Prefer fake transports and stores
 over live Proxmox calls.

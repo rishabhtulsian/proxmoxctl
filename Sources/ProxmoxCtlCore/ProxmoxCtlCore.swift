@@ -15,6 +15,7 @@ public enum ProxmoxCtlError: LocalizedError, Equatable {
     case mismatchedTokenID(expected: String, actual: String)
     case unsupportedOperation(LifecycleOperation, GuestType)
     case confirmationDeclined
+    case invalidAPITimeout
 
     public var errorDescription: String? {
         switch self {
@@ -45,6 +46,8 @@ public enum ProxmoxCtlError: LocalizedError, Equatable {
             return "Operation \(operation.rawValue) is not supported for \(type.rawValue) guests."
         case .confirmationDeclined:
             return "Operation cancelled."
+        case .invalidAPITimeout:
+            return "API timeout must be a finite number greater than zero."
         }
     }
 }
@@ -107,14 +110,33 @@ public struct HostRecord: Codable, Equatable {
 }
 
 public struct AppConfig: Codable, Equatable {
+    public static let defaultAPITimeoutSeconds: TimeInterval = 5
+
     public var version: Int
     public var defaultHostAlias: String?
     public var hosts: [HostRecord]
+    public private(set) var apiTimeoutSeconds: TimeInterval?
 
-    public init(version: Int = 1, defaultHostAlias: String? = nil, hosts: [HostRecord] = []) {
+    public var effectiveAPITimeoutSeconds: TimeInterval {
+        apiTimeoutSeconds ?? Self.defaultAPITimeoutSeconds
+    }
+
+    public init(
+        version: Int = 1,
+        defaultHostAlias: String? = nil,
+        hosts: [HostRecord] = []
+    ) {
         self.version = version
         self.defaultHostAlias = defaultHostAlias
         self.hosts = hosts
+        self.apiTimeoutSeconds = nil
+    }
+
+    public mutating func setAPITimeoutSeconds(_ seconds: TimeInterval) throws {
+        guard seconds.isFinite, seconds > 0 else {
+            throw ProxmoxCtlError.invalidAPITimeout
+        }
+        apiTimeoutSeconds = seconds
     }
 
     public func resolveHost(alias: String?) throws -> HostRecord {
@@ -466,6 +488,7 @@ public final class ProxmoxClient {
     private let baseURL: URL
     private let tokenID: String
     private let tokenSecret: String
+    private let apiTimeoutSeconds: TimeInterval
     private let transport: ProxmoxTransport
     private let debugLogger: HTTPDebugLogger?
     private let hostAlias: String?
@@ -476,6 +499,7 @@ public final class ProxmoxClient {
         baseURL: URL,
         tokenID: String,
         tokenSecret: String,
+        apiTimeoutSeconds: TimeInterval = AppConfig.defaultAPITimeoutSeconds,
         transport: ProxmoxTransport = URLSessionProxmoxTransport(),
         debugLogger: HTTPDebugLogger? = nil,
         hostAlias: String? = nil,
@@ -484,6 +508,7 @@ public final class ProxmoxClient {
         self.baseURL = baseURL
         self.tokenID = tokenID
         self.tokenSecret = tokenSecret
+        self.apiTimeoutSeconds = apiTimeoutSeconds
         self.transport = transport
         self.debugLogger = debugLogger
         self.hostAlias = hostAlias
@@ -594,19 +619,25 @@ public final class ProxmoxClient {
     }
 
     private func get<T: Decodable>(_ path: [String], queryItems: [URLQueryItem] = []) async throws -> T {
-        var request = URLRequest(url: endpoint(path, queryItems: queryItems))
+        var request = request(url: endpoint(path, queryItems: queryItems))
         request.httpMethod = "GET"
         authorize(&request)
         return try await perform(request)
     }
 
     private func post<T: Decodable>(_ path: [String]) async throws -> T {
-        var request = URLRequest(url: endpoint(path))
+        var request = request(url: endpoint(path))
         request.httpMethod = "POST"
         request.httpBody = Data()
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         authorize(&request)
         return try await perform(request)
+    }
+
+    private func request(url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = apiTimeoutSeconds
+        return request
     }
 
     private func perform<T: Decodable>(_ request: URLRequest) async throws -> T {

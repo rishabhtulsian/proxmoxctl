@@ -293,6 +293,44 @@ final class ProxmoxClientTests: XCTestCase {
             )
         }
     }
+
+    func testClientDefaultsRequestsToFiveSecondTimeout() async throws {
+        let transport = RecordingTransport(data: #"{"data":{"version":"8.4"}}"#)
+        let client = ProxmoxClient(
+            baseURL: try XCTUnwrap(URL(string: "https://example.test:8006")),
+            tokenID: "root@pam!cli",
+            tokenSecret: "secret-token",
+            transport: transport
+        )
+
+        _ = try await client.version()
+
+        XCTAssertEqual(transport.requests.map(\.timeoutInterval), [5])
+    }
+
+    func testClientAppliesConfiguredTimeoutToGetAndPostRequests() async throws {
+        let transport = SequencedTransport(responses: [
+            .init(data: #"{"data":{"version":"8.4"}}"#),
+            .init(data: #"{"data":"UPID:pve01:123"}"#)
+        ])
+        let client = ProxmoxClient(
+            baseURL: try XCTUnwrap(URL(string: "https://example.test:8006")),
+            tokenID: "root@pam!cli",
+            tokenSecret: "secret-token",
+            apiTimeoutSeconds: 12.5,
+            transport: transport
+        )
+
+        _ = try await client.version()
+        _ = try await client.lifecycle(
+            node: "pve01",
+            type: .qemu,
+            vmid: 200,
+            operation: .start
+        )
+
+        XCTAssertEqual(transport.requests.map(\.timeoutInterval), [12.5, 12.5])
+    }
 }
 
 private final class RecordingTransport: ProxmoxTransport {

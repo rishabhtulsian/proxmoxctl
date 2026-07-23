@@ -1,3 +1,4 @@
 /.build/
 /.swiftpm/
+/.worktrees/
 .DS_Store

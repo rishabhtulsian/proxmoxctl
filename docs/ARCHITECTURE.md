@@ -23,10 +23,13 @@ thin executable target.
 4. The selected host alias resolves to a URL and token ID.
 5. The token secret is loaded through `AuthorizingSecretStore`, which authorizes
    through LocalAuthentication before reading Keychain.
-6. `ProxmoxClient` builds `/api2/json/...` requests, injects a
+6. The runtime passes the effective global API timeout to `ProxmoxClient`;
+   missing values use the 5-second default.
+7. `ProxmoxClient` builds `/api2/json/...` requests, assigns the timeout to
+   every `URLRequest`, injects a
    `PVEAPIToken=<tokenID>=<secret>` Authorization header, sends through
    `ProxmoxTransport`, and decodes Proxmox `data` envelopes.
-7. Commands render JSON or table output, or print Proxmox task IDs for lifecycle
+8. Commands render JSON or table output, or print Proxmox task IDs for lifecycle
    operations.
 
 ## Config And Secrets
@@ -42,6 +45,7 @@ The config contains:
 - Schema version.
 - Default host alias.
 - Host aliases, base URLs, and API token IDs.
+- Global API timeout in seconds.
 
 Token secrets are not written to the config file. They are stored in the macOS
 Keychain by alias. Keychain reads and writes are wrapped by

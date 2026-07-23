@@ -89,8 +89,19 @@ Configuration is stored as JSON at:
 ~/.config/proxmoxctl/config.json
 ```
 
-The config stores aliases, URLs, token IDs, and the default host. Token secrets
-are stored separately in the macOS Keychain.
+The config stores aliases, URLs, token IDs, the default host, and the global
+`apiTimeoutSeconds` value. Token secrets are stored separately in the macOS
+Keychain.
+
+Set the application-wide Proxmox API timeout with:
+
+```bash
+proxmoxctl config set-timeout 10
+```
+
+The timeout applies to every configured host and every API-backed command,
+including `doctor`. It defaults to 5 seconds when `apiTimeoutSeconds` is absent
+from `config.json`. The value must be a finite number greater than zero.
 
 Manage host aliases:
 

@@ -60,6 +60,7 @@ struct ProxmoxCtl: AsyncParsableCommand {
         commandName: "proxmoxctl",
         abstract: "Query and control Proxmox VE nodes, VMs, and containers.",
         subcommands: [
+            Config.self,
             Host.self,
             Doctor.self,
             Nodes.self,
@@ -82,7 +83,8 @@ struct GlobalOptions: ParsableArguments {
     }
 
     func runtime() -> Runtime {
-        if let session = InteractiveRuntimeContext.current, session.usesConfig(fileURL) {
+        if let session = InteractiveRuntimeContext.current,
+           config == nil || session.usesConfig(fileURL) {
             return session.runtime(commandVerbose: verbose)
         }
         return Runtime.standard(fileURL: fileURL, verbose: verbose)
@@ -122,6 +124,7 @@ struct Runtime {
             baseURL: host.url,
             tokenID: host.tokenID,
             tokenSecret: secret,
+            apiTimeoutSeconds: config.effectiveAPITimeoutSeconds,
             debugLogger: debugLogger,
             hostAlias: host.alias,
             sessionCache: sessionCache
@@ -246,6 +249,32 @@ struct InteractiveShell {
             message = ProxmoxCtl.fullMessage(for: error)
         }
         fputs(message.hasSuffix("\n") ? message : "\(message)\n", stderr)
+    }
+}
+
+struct Config: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Manage proxmoxctl configuration.",
+        subcommands: [ConfigSetTimeout.self]
+    )
+}
+
+struct ConfigSetTimeout: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "set-timeout",
+        abstract: "Set the global Proxmox API timeout."
+    )
+
+    @OptionGroup var options: GlobalOptions
+    @Argument(help: "Timeout in seconds. Must be finite and greater than zero.")
+    var seconds: Double
+
+    func run() throws {
+        let runtime = options.runtime()
+        var config = try runtime.config()
+        try config.setAPITimeoutSeconds(seconds)
+        try runtime.configStore.save(config)
+        print("API timeout is now \(seconds) seconds")
     }
 }
 
