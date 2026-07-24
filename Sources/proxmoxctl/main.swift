@@ -69,6 +69,25 @@ struct ProxmoxCtl: AsyncParsableCommand {
             Interactive.self
         ]
     )
+
+    @Option(help: "Path to the proxmoxctl config file. May appear before the subcommand.")
+    var config: String?
+
+    @Flag(
+        name: [.customShort("v"), .long],
+        help: "Log redacted HTTP details. May appear before the subcommand."
+    )
+    var verbose = false
+
+    var globalOptions: GlobalOptions {
+        GlobalOptions(config: config, verbose: verbose)
+    }
+
+    mutating func validate() throws {
+        try GlobalOptionOccurrenceValidator.validate(
+            arguments: Array(ProcessInfo.processInfo.arguments.dropFirst())
+        )
+    }
 }
 
 struct GlobalOptions: ParsableArguments {
@@ -77,6 +96,13 @@ struct GlobalOptions: ParsableArguments {
 
     @Flag(name: [.customShort("v"), .long], help: "Log HTTP requests and responses to standard error with secrets redacted.")
     var verbose = false
+
+    init() {}
+
+    init(config: String?, verbose: Bool) {
+        self.config = config
+        self.verbose = verbose
+    }
 
     var fileURL: URL {
         (config.map { URL(fileURLWithPath: $0) } ?? FileConfigStore.defaultURL).standardizedFileURL
@@ -88,6 +114,59 @@ struct GlobalOptions: ParsableArguments {
             return session.runtime(commandVerbose: verbose)
         }
         return Runtime.standard(fileURL: fileURL, verbose: verbose)
+    }
+}
+
+enum EffectiveOptionsResolver {
+    static func resolve(root: GlobalOptions, leaf: GlobalOptions) throws -> GlobalOptions {
+        let config: String?
+        switch (root.config, leaf.config) {
+        case (nil, nil):
+            config = nil
+        case (let value?, nil), (nil, let value?):
+            config = value
+        case (let rootValue?, let leafValue?):
+            let rootIdentity = ConfigIdentity(configURL: URL(fileURLWithPath: rootValue))
+            let leafIdentity = ConfigIdentity(configURL: URL(fileURLWithPath: leafValue))
+            guard rootIdentity == leafIdentity else {
+                throw ValidationError(
+                    "Conflicting config paths: \(rootValue) and \(leafValue). Supply one config or equivalent paths."
+                )
+            }
+            config = rootValue
+        }
+        return GlobalOptions(config: config, verbose: root.verbose || leaf.verbose)
+    }
+}
+
+enum GlobalOptionOccurrenceValidator {
+    static func validate(arguments: [String]) throws {
+        var suppliedConfigs: [String] = []
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument == "--config", index + 1 < arguments.count {
+                suppliedConfigs.append(arguments[index + 1])
+                index += 2
+                continue
+            }
+            if argument.hasPrefix("--config=") {
+                suppliedConfigs.append(String(argument.dropFirst("--config=".count)))
+            }
+            index += 1
+        }
+
+        guard let first = suppliedConfigs.first else {
+            return
+        }
+        let firstIdentity = ConfigIdentity(configURL: URL(fileURLWithPath: first))
+        if let conflicting = suppliedConfigs.dropFirst().first(where: {
+            ConfigIdentity(configURL: URL(fileURLWithPath: $0)) != firstIdentity
+        }) {
+            throw ValidationError(
+                "Conflicting config paths: \(first) and \(conflicting). Supply one config or equivalent paths."
+            )
+        }
     }
 }
 
@@ -116,8 +195,12 @@ struct Runtime {
     func client(host alias: String?) throws -> ProxmoxClient {
         let config = try configStore.load()
         let host = try config.resolveHost(alias: alias)
+        let identity = try CredentialIdentityResolver.resolve(
+            host: host,
+            configURL: configStore.fileURL
+        )
         let secret = try secretStore.loadSecret(
-            for: host.alias,
+            for: identity,
             reason: "Access the Proxmox API token for \(host.alias)"
         )
         return ProxmoxClient(
@@ -183,10 +266,18 @@ struct Interactive: AsyncParsableCommand {
         abstract: "Start an interactive proxmoxctl session."
     )
 
+    @ParentCommand var parent: ProxmoxCtl
     @OptionGroup var options: GlobalOptions
 
     mutating func run() async throws {
-        let session = InteractiveRuntimeSession(fileURL: options.fileURL, verbose: options.verbose)
+        let effective = try EffectiveOptionsResolver.resolve(
+            root: parent.globalOptions,
+            leaf: options
+        )
+        let session = InteractiveRuntimeSession(
+            fileURL: effective.fileURL,
+            verbose: effective.verbose
+        )
         await InteractiveRuntimeContext.$current.withValue(session) {
             await InteractiveShell(session: session).run()
         }
@@ -233,6 +324,7 @@ struct InteractiveShell {
     }
 
     private func execute(tokens: [String]) async throws {
+        try GlobalOptionOccurrenceValidator.validate(arguments: tokens)
         var command = try ProxmoxCtl.parseAsRoot(tokens)
         if var asyncCommand = command as? AsyncParsableCommand {
             try await asyncCommand.run()
@@ -257,6 +349,8 @@ struct Config: ParsableCommand {
         abstract: "Manage proxmoxctl configuration.",
         subcommands: [ConfigSetTimeout.self]
     )
+
+    @ParentCommand var root: ProxmoxCtl
 }
 
 struct ConfigSetTimeout: ParsableCommand {
@@ -265,12 +359,16 @@ struct ConfigSetTimeout: ParsableCommand {
         abstract: "Set the global Proxmox API timeout."
     )
 
+    @ParentCommand var parent: Config
     @OptionGroup var options: GlobalOptions
     @Argument(help: "Timeout in seconds. Must be finite and greater than zero.")
     var seconds: Double
 
     func run() throws {
-        let runtime = options.runtime()
+        let runtime = try EffectiveOptionsResolver.resolve(
+            root: parent.root.globalOptions,
+            leaf: options
+        ).runtime()
         var config = try runtime.config()
         try config.setAPITimeoutSeconds(seconds)
         try runtime.configStore.save(config)
@@ -283,38 +381,62 @@ struct Host: ParsableCommand {
         abstract: "Manage Proxmox host configuration.",
         subcommands: [HostAdd.self, HostList.self, HostUse.self, HostRemove.self]
     )
+
+    @ParentCommand var root: ProxmoxCtl
 }
 
 struct HostAdd: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "add")
+    static let configuration = CommandConfiguration(
+        commandName: "add",
+        abstract: "Add a host, or explicitly replace one with --replace."
+    )
 
+    @ParentCommand var parent: Host
     @OptionGroup var options: GlobalOptions
-    @Argument(help: "Host alias.")
+    @Argument(help: "Host alias: non-empty, no control characters or surrounding whitespace.")
     var alias: String
-    @Option(help: "Proxmox base URL, for example https://proxmox.example.com:8006.")
+    @Option(help: "HTTPS base URL with host and optional port; paths, credentials, queries, and fragments are rejected.")
     var url: String
     @Option(help: "Proxmox API token ID, for example root@pam!cli.")
     var tokenID: String
     @Flag(name: .customLong("default"), help: "Make this host the default.")
     var makeDefault = false
+    @Flag(help: "Replace an existing alias using a newly staged, config-scoped credential.")
+    var replace = false
     @Flag(help: "Read the API token secret from standard input.")
     var tokenSecretStdin = false
 
     func run() throws {
-        guard let hostURL = URL(string: url), hostURL.scheme == "https" else {
-            throw ValidationError("url must be an https URL")
-        }
-        let runtime = options.runtime()
-        var config = try runtime.config()
+        let validatedAlias = try ConfigurationValidator.validateAlias(alias)
+        let hostURL = try ConfigurationValidator.validateAndCanonicalizeBaseURL(url)
+        let runtime = try EffectiveOptionsResolver.resolve(
+            root: parent.root.globalOptions,
+            leaf: options
+        ).runtime()
+        let candidate = HostRecord(alias: validatedAlias, url: hostURL, tokenID: tokenID)
+        let coordinator = HostCredentialCoordinator(
+            configStore: runtime.configStore,
+            secretStore: runtime.secretStore
+        )
+        try coordinator.validateAdd(host: candidate, replace: replace)
         let credential = try TokenCredential(tokenID: tokenID, inputSecret: readTokenSecret())
         guard !credential.secret.isEmpty else {
             throw ValidationError("API token secret cannot be empty")
         }
-        let host = HostRecord(alias: alias, url: hostURL, tokenID: credential.tokenID)
-        config.upsertHost(host, makeDefault: makeDefault)
-        try runtime.secretStore.saveSecret(credential.secret, for: alias)
-        try runtime.configStore.save(config)
-        print("Stored host \(alias)")
+        let result = try coordinator.add(
+            host: HostRecord(
+                alias: validatedAlias,
+                url: hostURL,
+                tokenID: credential.tokenID
+            ),
+            secret: credential.secret,
+            makeDefault: makeDefault,
+            replace: replace
+        )
+        if let warning = result.cleanupWarning {
+            FileHandle.standardError.write(Data(("Warning: \(warning.message)\n").utf8))
+        }
+        print("Stored host \(validatedAlias)")
     }
 
     private func readTokenSecret() throws -> String {
@@ -335,10 +457,15 @@ struct HostAdd: ParsableCommand {
 struct HostList: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list")
 
+    @ParentCommand var parent: Host
     @OptionGroup var options: GlobalOptions
 
     func run() throws {
-        let config = try options.runtime().config()
+        let effective = try EffectiveOptionsResolver.resolve(
+            root: parent.root.globalOptions,
+            leaf: options
+        )
+        let config = try effective.runtime().config()
         print(TableRenderer.renderHosts(config.hosts, defaultAlias: config.defaultHostAlias))
     }
 }
@@ -346,11 +473,15 @@ struct HostList: ParsableCommand {
 struct HostUse: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "use")
 
+    @ParentCommand var parent: Host
     @OptionGroup var options: GlobalOptions
     @Argument var alias: String
 
     func run() throws {
-        let runtime = options.runtime()
+        let runtime = try EffectiveOptionsResolver.resolve(
+            root: parent.root.globalOptions,
+            leaf: options
+        ).runtime()
         var config = try runtime.config()
         _ = try config.resolveHost(alias: alias)
         config.defaultHostAlias = alias
@@ -362,15 +493,23 @@ struct HostUse: ParsableCommand {
 struct HostRemove: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "remove")
 
+    @ParentCommand var parent: Host
     @OptionGroup var options: GlobalOptions
     @Argument var alias: String
 
     func run() throws {
-        let runtime = options.runtime()
-        var config = try runtime.config()
-        try config.removeHost(alias: alias)
-        try runtime.secretStore.deleteSecret(for: alias)
-        try runtime.configStore.save(config)
+        let runtime = try EffectiveOptionsResolver.resolve(
+            root: parent.root.globalOptions,
+            leaf: options
+        ).runtime()
+        let result = try HostCredentialCoordinator(
+            configStore: runtime.configStore,
+            secretStore: runtime.secretStore
+        )
+        .remove(alias: alias)
+        if let warning = result.cleanupWarning {
+            FileHandle.standardError.write(Data(("Warning: \(warning.message)\n").utf8))
+        }
         print("Removed host \(alias)")
     }
 }
@@ -378,12 +517,17 @@ struct HostRemove: ParsableCommand {
 struct Doctor: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Check connectivity and authentication for a host.")
 
+    @ParentCommand var parent: ProxmoxCtl
     @OptionGroup var options: GlobalOptions
     @Option(help: "Configured host alias. Defaults to the selected default host.")
     var host: String?
 
     mutating func run() async throws {
-        let version = try await options.runtime().client(host: host).version()
+        let effective = try EffectiveOptionsResolver.resolve(
+            root: parent.globalOptions,
+            leaf: options
+        )
+        let version = try await effective.runtime().client(host: host).version()
         let display = [version.version, version.release].compactMap { $0 }.joined(separator: " ")
         print(display.isEmpty ? "Connected" : "Connected to Proxmox VE \(display)")
     }
@@ -392,6 +536,7 @@ struct Doctor: AsyncParsableCommand {
 struct Nodes: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "List Proxmox nodes.")
 
+    @ParentCommand var parent: ProxmoxCtl
     @OptionGroup var options: GlobalOptions
     @Option(help: "Configured host alias. Defaults to the selected default host.")
     var host: String?
@@ -399,14 +544,21 @@ struct Nodes: AsyncParsableCommand {
     var json = false
 
     mutating func run() async throws {
-        let nodes = try await options.runtime().client(host: host).nodes()
+        let effective = try EffectiveOptionsResolver.resolve(
+            root: parent.globalOptions,
+            leaf: options
+        )
+        let nodes = try await effective.runtime().client(host: host).nodes()
         print(json ? try JSONRenderer.render(nodes) : TableRenderer.renderNodes(nodes))
     }
 }
 
 struct Guests: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "List QEMU VMs and LXC containers.")
+    static let configuration = CommandConfiguration(
+        abstract: "List guests on online nodes; fail if none are online unless --node is supplied."
+    )
 
+    @ParentCommand var parent: ProxmoxCtl
     @OptionGroup var options: GlobalOptions
     @Option(help: "Configured host alias. Defaults to the selected default host.")
     var host: String?
@@ -418,13 +570,15 @@ struct Guests: AsyncParsableCommand {
     var json = false
 
     mutating func run() async throws {
-        let client = try options.runtime().client(host: host)
-        let nodeNames: [String]
-        if let node {
-            nodeNames = [node]
-        } else {
-            nodeNames = try await client.nodes().filter { $0.status == "online" }.map(\.node)
-        }
+        let effective = try EffectiveOptionsResolver.resolve(
+            root: parent.globalOptions,
+            leaf: options
+        )
+        let client = try effective.runtime().client(host: host)
+        let nodeNames = try await GuestListPlanner.nodeNames(
+            explicitNode: node,
+            inventory: node == nil ? client.nodes() : nil
+        )
         var guests: [GuestSummary] = []
         for nodeName in nodeNames {
             if type == .qemu || type == .all {
@@ -454,6 +608,8 @@ struct Guest: AsyncParsableCommand {
             GuestResume.self
         ]
     )
+
+    @ParentCommand var root: ProxmoxCtl
 }
 
 struct GuestCommonOptions: ParsableArguments {
@@ -462,7 +618,7 @@ struct GuestCommonOptions: ParsableArguments {
     var vmid: Int
     @Option(help: "Cluster node name. If omitted, proxmoxctl uses the only node on the host.")
     var node: String?
-    @Option(help: "Guest type: qemu or lxc. If omitted, proxmoxctl probes QEMU then LXC.")
+    @Option(help: "Guest type: qemu or lxc. If omitted, cluster inventory is checked first, then guest endpoints are probed as fallback.")
     var type: GuestType?
     @Option(help: "Configured host alias. Defaults to the selected default host.")
     var host: String?
@@ -472,16 +628,21 @@ struct GuestCommonOptions: ParsableArguments {
 
 struct GuestLifecycleOptions: ParsableArguments {
     @OptionGroup var common: GuestCommonOptions
-    @Flag(help: "Skip confirmation prompts for disruptive operations.")
+    @Flag(help: "Approve the lifecycle mutation without prompting; required for non-interactive input.")
     var yes = false
 }
 
 struct GuestStatus: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "status")
+    @ParentCommand var parent: Guest
     @OptionGroup var options: GuestCommonOptions
 
     mutating func run() async throws {
-        let client = try options.global.runtime().client(host: options.host)
+        let effective = try EffectiveOptionsResolver.resolve(
+            root: parent.root.globalOptions,
+            leaf: options.global
+        )
+        let client = try effective.runtime().client(host: options.host)
         let node = try await resolveNode(common: options, client: client)
         let guest: GuestSummary
         if let type = options.type {
@@ -498,60 +659,114 @@ struct GuestStatus: AsyncParsableCommand {
 }
 
 struct GuestStart: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "start")
+    static let configuration = CommandConfiguration(commandName: "start", abstract: "Start a guest after confirmation.")
+    @ParentCommand var parent: Guest
     @OptionGroup var options: GuestLifecycleOptions
-    mutating func run() async throws { try await runLifecycle(.start, options: options) }
+    mutating func run() async throws {
+        try await runLifecycle(.start, options: options, rootOptions: parent.root.globalOptions)
+    }
 }
 
 struct GuestShutdown: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "shutdown")
+    static let configuration = CommandConfiguration(commandName: "shutdown", abstract: "Shut down a guest after confirmation.")
+    @ParentCommand var parent: Guest
     @OptionGroup var options: GuestLifecycleOptions
-    mutating func run() async throws { try await runLifecycle(.shutdown, options: options) }
+    mutating func run() async throws {
+        try await runLifecycle(.shutdown, options: options, rootOptions: parent.root.globalOptions)
+    }
 }
 
 struct GuestStop: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "stop")
+    static let configuration = CommandConfiguration(commandName: "stop", abstract: "Stop a guest after confirmation.")
+    @ParentCommand var parent: Guest
     @OptionGroup var options: GuestLifecycleOptions
-    mutating func run() async throws { try await runLifecycle(.stop, options: options) }
+    mutating func run() async throws {
+        try await runLifecycle(.stop, options: options, rootOptions: parent.root.globalOptions)
+    }
 }
 
 struct GuestReboot: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "reboot")
+    static let configuration = CommandConfiguration(commandName: "reboot", abstract: "Reboot a guest after confirmation.")
+    @ParentCommand var parent: Guest
     @OptionGroup var options: GuestLifecycleOptions
-    mutating func run() async throws { try await runLifecycle(.reboot, options: options) }
+    mutating func run() async throws {
+        try await runLifecycle(.reboot, options: options, rootOptions: parent.root.globalOptions)
+    }
 }
 
 struct GuestReset: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "reset")
+    static let configuration = CommandConfiguration(commandName: "reset", abstract: "Reset a supported guest after confirmation.")
+    @ParentCommand var parent: Guest
     @OptionGroup var options: GuestLifecycleOptions
-    mutating func run() async throws { try await runLifecycle(.reset, options: options) }
+    mutating func run() async throws {
+        try await runLifecycle(.reset, options: options, rootOptions: parent.root.globalOptions)
+    }
 }
 
 struct GuestSuspend: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "suspend")
+    static let configuration = CommandConfiguration(commandName: "suspend", abstract: "Suspend a guest after confirmation.")
+    @ParentCommand var parent: Guest
     @OptionGroup var options: GuestLifecycleOptions
-    mutating func run() async throws { try await runLifecycle(.suspend, options: options) }
+    mutating func run() async throws {
+        try await runLifecycle(.suspend, options: options, rootOptions: parent.root.globalOptions)
+    }
 }
 
 struct GuestPause: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "pause", abstract: "Alias for suspend.")
+    @ParentCommand var parent: Guest
     @OptionGroup var options: GuestLifecycleOptions
-    mutating func run() async throws { try await runLifecycle(.suspend, options: options) }
+    mutating func run() async throws {
+        try await runLifecycle(.suspend, options: options, rootOptions: parent.root.globalOptions)
+    }
 }
 
 struct GuestResume: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "resume")
+    static let configuration = CommandConfiguration(commandName: "resume", abstract: "Resume a guest after confirmation.")
+    @ParentCommand var parent: Guest
     @OptionGroup var options: GuestLifecycleOptions
-    mutating func run() async throws { try await runLifecycle(.resume, options: options) }
+    mutating func run() async throws {
+        try await runLifecycle(.resume, options: options, rootOptions: parent.root.globalOptions)
+    }
 }
 
-func runLifecycle(_ operation: LifecycleOperation, options: GuestLifecycleOptions) async throws {
+func runLifecycle(
+    _ operation: LifecycleOperation,
+    options: GuestLifecycleOptions,
+    rootOptions: GlobalOptions
+) async throws {
     let common = options.common
-    let client = try common.global.runtime().client(host: common.host)
-    let node = try await resolveNode(common: common, client: client)
-    let type = try await resolveGuestType(common: common, node: node, client: client)
-    try confirmIfNeeded(operation: operation, vmid: common.vmid, node: node, type: type, yes: options.yes)
-    let task = try await client.lifecycle(node: node, type: type, vmid: common.vmid, operation: operation)
+    let effective = try EffectiveOptionsResolver.resolve(
+        root: rootOptions,
+        leaf: common.global
+    )
+    let client = try effective.runtime().client(host: common.host)
+    let task = try await LifecyclePreflight.execute(
+        operation: operation,
+        resolveNode: {
+            try await resolveNode(common: common, client: client)
+        },
+        resolveType: { node in
+            try await resolveGuestType(common: common, node: node, client: client)
+        },
+        authorize: { node, type in
+            try confirmIfNeeded(
+                operation: operation,
+                vmid: common.vmid,
+                node: node,
+                type: type,
+                yes: options.yes
+            )
+        },
+        perform: { node, type in
+            try await client.lifecycle(
+                node: node,
+                type: type,
+                vmid: common.vmid,
+                operation: operation
+            )
+        }
+    )
     if common.json {
         print(try JSONRenderer.render(task))
     } else {
@@ -574,14 +789,16 @@ func resolveGuestType(common: GuestCommonOptions, node: String, client: ProxmoxC
 }
 
 func confirmIfNeeded(operation: LifecycleOperation, vmid: Int, node: String, type: GuestType, yes: Bool) throws {
-    guard ConfirmationPolicy.requiresPrompt(for: operation, assumeYes: yes) else {
-        return
-    }
-    guard isatty(STDIN_FILENO) == 1 else {
-        throw ValidationError("Operation \(operation.rawValue) requires --yes when standard input is not interactive.")
-    }
-    fputs("Confirm \(operation.rawValue) for \(type.rawValue) guest \(vmid) on \(node) by typing yes: ", stderr)
-    guard readLine()?.lowercased() == "yes" else {
-        throw ProxmoxCtlError.confirmationDeclined
-    }
+    try ConfirmationPolicy.authorize(
+        operation: operation,
+        assumeYes: yes,
+        isInteractive: isatty(STDIN_FILENO) == 1,
+        prompt: {
+            fputs(
+                "Confirm \(operation.rawValue) for \(type.rawValue) guest \(vmid) on \(node) by typing yes: ",
+                stderr
+            )
+            return readLine()?.lowercased() == "yes"
+        }
+    )
 }

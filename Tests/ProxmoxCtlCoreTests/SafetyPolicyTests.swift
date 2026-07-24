@@ -2,16 +2,16 @@
 import XCTest
 
 final class SafetyPolicyTests: XCTestCase {
-    func testDisruptiveOperationsRequireConfirmationUnlessYesIsSet() {
-        XCTAssertFalse(ConfirmationPolicy.requiresPrompt(for: .start, assumeYes: false))
-        XCTAssertFalse(ConfirmationPolicy.requiresPrompt(for: .shutdown, assumeYes: false))
-        XCTAssertFalse(ConfirmationPolicy.requiresPrompt(for: .resume, assumeYes: false))
-
-        XCTAssertTrue(ConfirmationPolicy.requiresPrompt(for: .stop, assumeYes: false))
-        XCTAssertTrue(ConfirmationPolicy.requiresPrompt(for: .reboot, assumeYes: false))
-        XCTAssertTrue(ConfirmationPolicy.requiresPrompt(for: .reset, assumeYes: false))
-        XCTAssertTrue(ConfirmationPolicy.requiresPrompt(for: .suspend, assumeYes: false))
-
-        XCTAssertFalse(ConfirmationPolicy.requiresPrompt(for: .stop, assumeYes: true))
+    func testEveryLifecycleOperationRequiresConfirmationUnlessYesIsSet() {
+        for operation in LifecycleOperation.allCases {
+            XCTAssertTrue(
+                ConfirmationPolicy.requiresPrompt(for: operation, assumeYes: false),
+                "\(operation.rawValue) should require confirmation"
+            )
+            XCTAssertFalse(
+                ConfirmationPolicy.requiresPrompt(for: operation, assumeYes: true),
+                "\(operation.rawValue) should honor explicit --yes"
+            )
+        }
     }
 }

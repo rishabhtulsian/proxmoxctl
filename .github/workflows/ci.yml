@@ -33,7 +33,7 @@ jobs:
       - name: Test
         run: swift test
 
-      - name: Verify CLI
+      - name: Verify CLI and local integration scripts
         run: ./script/build_and_run.sh --verify
 
       - name: Interactive pipe smoke

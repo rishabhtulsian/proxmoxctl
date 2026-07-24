@@ -16,6 +16,13 @@ public enum ProxmoxCtlError: LocalizedError, Equatable {
     case unsupportedOperation(LifecycleOperation, GuestType)
     case confirmationDeclined
     case invalidAPITimeout
+    case invalidHostAlias
+    case invalidHostURL
+    case ambiguousLegacyCredential(String)
+    case hostAlreadyExists(String)
+    case invalidTokenSecret
+    case noOnlineNodes
+    case nonInteractiveConfirmationRequired(LifecycleOperation)
 
     public var errorDescription: String? {
         switch self {
@@ -48,6 +55,20 @@ public enum ProxmoxCtlError: LocalizedError, Equatable {
             return "Operation cancelled."
         case .invalidAPITimeout:
             return "API timeout must be a finite number greater than zero."
+        case .invalidHostAlias:
+            return "Host alias must be non-empty, contain no control characters, and have no leading or trailing whitespace."
+        case .invalidHostURL:
+            return "Host URL must be an absolute HTTPS URL with a host and optional port, without credentials, query, fragment, or path."
+        case .ambiguousLegacyCredential(let alias):
+            return "Host \(alias) uses an ambiguous legacy credential in a custom config. Re-enroll it with host add \(alias) --replace."
+        case .hostAlreadyExists(let alias):
+            return "Host \(alias) is already configured. Pass --replace to replace it explicitly."
+        case .invalidTokenSecret:
+            return "API token secret cannot be empty."
+        case .noOnlineNodes:
+            return "No online Proxmox nodes are available. Check cluster node status or pass --node to query a specific node."
+        case .nonInteractiveConfirmationRequired(let operation):
+            return "Operation \(operation.rawValue) requires --yes when standard input is not interactive."
         }
     }
 }
@@ -101,11 +122,18 @@ public struct HostRecord: Codable, Equatable {
     public var alias: String
     public var url: URL
     public var tokenID: String
+    public var credentialReference: String?
 
-    public init(alias: String, url: URL, tokenID: String) {
+    public init(
+        alias: String,
+        url: URL,
+        tokenID: String,
+        credentialReference: String? = nil
+    ) {
         self.alias = alias
         self.url = url
         self.tokenID = tokenID
+        self.credentialReference = credentialReference
     }
 }
 
@@ -177,7 +205,7 @@ public struct AppConfig: Codable, Equatable {
 }
 
 public final class FileConfigStore {
-    private let fileURL: URL
+    public let fileURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -200,10 +228,13 @@ public final class FileConfigStore {
             return AppConfig()
         }
         let data = try Data(contentsOf: fileURL)
-        return try decoder.decode(AppConfig.self, from: data)
+        let config = try decoder.decode(AppConfig.self, from: data)
+        try config.validate()
+        return config
     }
 
     public func save(_ config: AppConfig) throws {
+        try config.validate()
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let data = try encoder.encode(config)
@@ -247,7 +278,24 @@ public enum LifecycleOperation: String, Codable, CaseIterable, Equatable, Sendab
 
 public enum ConfirmationPolicy {
     public static func requiresPrompt(for operation: LifecycleOperation, assumeYes: Bool) -> Bool {
-        operation.isDisruptive && !assumeYes
+        !assumeYes
+    }
+
+    public static func authorize(
+        operation: LifecycleOperation,
+        assumeYes: Bool,
+        isInteractive: Bool,
+        prompt: () -> Bool
+    ) throws {
+        guard requiresPrompt(for: operation, assumeYes: assumeYes) else {
+            return
+        }
+        guard isInteractive else {
+            throw ProxmoxCtlError.nonInteractiveConfirmationRequired(operation)
+        }
+        guard prompt() else {
+            throw ProxmoxCtlError.confirmationDeclined
+        }
     }
 }
 
@@ -437,11 +485,14 @@ public enum HTTPDebugFormatter {
         }
 
         let tokenAndSecret = String(value.dropFirst(prefix.count))
-        guard let separator = tokenAndSecret.lastIndex(of: "=") else {
-            return "\(prefix)<redacted>"
+        guard let separator = tokenAndSecret.firstIndex(of: "=") else {
+            return "<redacted>"
         }
 
         let tokenID = tokenAndSecret[..<separator]
+        guard !tokenID.isEmpty, tokenID.contains("!") else {
+            return "<redacted>"
+        }
         return "\(prefix)\(tokenID)=<redacted>"
     }
 
@@ -929,21 +980,21 @@ private extension Character {
 
 public final class SessionCache {
     private let lock = NSLock()
-    private var secrets: [String: String] = [:]
+    private var secrets: [SecretIdentity: String] = [:]
     private var nodesByHostAlias: [String: [NodeSummary]] = [:]
 
     public init() {}
 
-    public func secret(for alias: String) -> String? {
+    public func secret(for identity: SecretIdentity) -> String? {
         lock.lock()
-        let secret = secrets[alias]
+        let secret = secrets[identity]
         lock.unlock()
         return secret
     }
 
-    public func storeSecret(_ secret: String, for alias: String) {
+    public func storeSecret(_ secret: String, for identity: SecretIdentity) {
         lock.lock()
-        secrets[alias] = secret
+        secrets[identity] = secret
         lock.unlock()
     }
 
@@ -966,10 +1017,10 @@ public final class SessionCache {
         lock.unlock()
     }
 
-    public func invalidateHost(_ alias: String) {
+    public func invalidateHost(_ identity: SecretIdentity) {
         lock.lock()
-        secrets.removeValue(forKey: alias)
-        nodesByHostAlias.removeValue(forKey: alias)
+        secrets.removeValue(forKey: identity)
+        nodesByHostAlias.removeValue(forKey: identity.alias)
         lock.unlock()
     }
 
@@ -982,9 +1033,9 @@ public final class SessionCache {
 }
 
 public protocol SecretStore {
-    func saveSecret(_ secret: String, for alias: String) throws
-    func loadSecret(for alias: String, reason: String) throws -> String
-    func deleteSecret(for alias: String) throws
+    func saveSecret(_ secret: String, for identity: SecretIdentity) throws
+    func loadSecret(for identity: SecretIdentity, reason: String) throws -> String
+    func deleteSecret(for identity: SecretIdentity) throws
 }
 
 public final class CachingSecretStore: SecretStore {
@@ -996,24 +1047,24 @@ public final class CachingSecretStore: SecretStore {
         self.cache = cache
     }
 
-    public func saveSecret(_ secret: String, for alias: String) throws {
-        try base.saveSecret(secret, for: alias)
-        cache.storeSecret(secret, for: alias)
-        cache.clearNodes(for: alias)
+    public func saveSecret(_ secret: String, for identity: SecretIdentity) throws {
+        try base.saveSecret(secret, for: identity)
+        cache.storeSecret(secret, for: identity)
+        cache.clearNodes(for: identity.alias)
     }
 
-    public func loadSecret(for alias: String, reason: String) throws -> String {
-        if let cached = cache.secret(for: alias) {
+    public func loadSecret(for identity: SecretIdentity, reason: String) throws -> String {
+        if let cached = cache.secret(for: identity) {
             return cached
         }
-        let secret = try base.loadSecret(for: alias, reason: reason)
-        cache.storeSecret(secret, for: alias)
+        let secret = try base.loadSecret(for: identity, reason: reason)
+        cache.storeSecret(secret, for: identity)
         return secret
     }
 
-    public func deleteSecret(for alias: String) throws {
-        try base.deleteSecret(for: alias)
-        cache.invalidateHost(alias)
+    public func deleteSecret(for identity: SecretIdentity) throws {
+        try base.deleteSecret(for: identity)
+        cache.invalidateHost(identity)
     }
 }
 
@@ -1074,18 +1125,18 @@ public final class AuthorizingSecretStore: SecretStore {
         self.authorizer = authorizer
     }
 
-    public func saveSecret(_ secret: String, for alias: String) throws {
-        try authorizer.authorize(reason: "Authorize storing the Proxmox API token for \(alias)")
-        try base.saveSecret(secret, for: alias)
+    public func saveSecret(_ secret: String, for identity: SecretIdentity) throws {
+        try authorizer.authorize(reason: "Authorize storing the Proxmox API token for \(identity.alias)")
+        try base.saveSecret(secret, for: identity)
     }
 
-    public func loadSecret(for alias: String, reason: String) throws -> String {
+    public func loadSecret(for identity: SecretIdentity, reason: String) throws -> String {
         try authorizer.authorize(reason: reason)
-        return try base.loadSecret(for: alias, reason: reason)
+        return try base.loadSecret(for: identity, reason: reason)
     }
 
-    public func deleteSecret(for alias: String) throws {
-        try base.deleteSecret(for: alias)
+    public func deleteSecret(for identity: SecretIdentity) throws {
+        try base.deleteSecret(for: identity)
     }
 }
 
@@ -1096,12 +1147,12 @@ public final class KeychainSecretStore: SecretStore {
         self.service = service
     }
 
-    public func saveSecret(_ secret: String, for alias: String) throws {
-        try deleteSecret(for: alias)
+    public func saveSecret(_ secret: String, for identity: SecretIdentity) throws {
+        try deleteSecret(for: identity)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: alias,
+            kSecAttrAccount as String: identity.account,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
             kSecValueData as String: Data(secret.utf8)
         ]
@@ -1111,20 +1162,23 @@ public final class KeychainSecretStore: SecretStore {
         }
     }
 
-    public func loadSecret(for alias: String, reason: String = "Access your Proxmox API token") throws -> String {
+    public func loadSecret(
+        for identity: SecretIdentity,
+        reason: String = "Access your Proxmox API token"
+    ) throws -> String {
         let context = LAContext()
         context.localizedReason = reason
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: alias,
+            kSecAttrAccount as String: identity.account,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecReturnData as String: true
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status != errSecItemNotFound else {
-            throw ProxmoxCtlError.secretMissing(alias)
+            throw ProxmoxCtlError.secretMissing(identity.alias)
         }
         guard status == errSecSuccess, let data = item as? Data, let secret = String(data: data, encoding: .utf8) else {
             throw KeychainError(status: status, operation: "load API token")
@@ -1132,11 +1186,11 @@ public final class KeychainSecretStore: SecretStore {
         return secret
     }
 
-    public func deleteSecret(for alias: String) throws {
+    public func deleteSecret(for identity: SecretIdentity) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: alias
+            kSecAttrAccount as String: identity.account
         ]
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {

@@ -3,26 +3,28 @@ import XCTest
 
 final class AuthorizingSecretStoreTests: XCTestCase {
     func testLoadAuthorizesBeforeReadingSecret() throws {
+        let identity = SecretIdentity(account: "v2:scope:ref", alias: "home")
         let base = RecordingSecretStore(secret: "secret-token")
         let authorizer = RecordingAuthorizer()
         let store = AuthorizingSecretStore(base: base, authorizer: authorizer)
 
-        let secret = try store.loadSecret(for: "home", reason: "Access token")
+        let secret = try store.loadSecret(for: identity, reason: "Access token")
 
         XCTAssertEqual(secret, "secret-token")
         XCTAssertEqual(authorizer.reasons, ["Access token"])
-        XCTAssertEqual(base.events, [.load("home")])
+        XCTAssertEqual(base.events, [.load(identity)])
     }
 
     func testSaveAuthorizesBeforeWritingSecret() throws {
+        let identity = SecretIdentity(account: "v2:scope:ref", alias: "home")
         let base = RecordingSecretStore(secret: nil)
         let authorizer = RecordingAuthorizer()
         let store = AuthorizingSecretStore(base: base, authorizer: authorizer)
 
-        try store.saveSecret("secret-token", for: "home")
+        try store.saveSecret("secret-token", for: identity)
 
         XCTAssertEqual(authorizer.reasons, ["Authorize storing the Proxmox API token for home"])
-        XCTAssertEqual(base.events, [.save("home", "secret-token")])
+        XCTAssertEqual(base.events, [.save(identity, "secret-token")])
     }
 }
 
@@ -36,9 +38,9 @@ private final class RecordingAuthorizer: LocalAuthorizer {
 
 private final class RecordingSecretStore: SecretStore {
     enum Event: Equatable {
-        case save(String, String)
-        case load(String)
-        case delete(String)
+        case save(SecretIdentity, String)
+        case load(SecretIdentity)
+        case delete(SecretIdentity)
     }
 
     var events: [Event] = []
@@ -48,19 +50,19 @@ private final class RecordingSecretStore: SecretStore {
         self.secret = secret
     }
 
-    func saveSecret(_ secret: String, for alias: String) throws {
-        events.append(.save(alias, secret))
+    func saveSecret(_ secret: String, for identity: SecretIdentity) throws {
+        events.append(.save(identity, secret))
     }
 
-    func loadSecret(for alias: String, reason: String) throws -> String {
-        events.append(.load(alias))
+    func loadSecret(for identity: SecretIdentity, reason: String) throws -> String {
+        events.append(.load(identity))
         guard let secret else {
-            throw ProxmoxCtlError.secretMissing(alias)
+            throw ProxmoxCtlError.secretMissing(identity.alias)
         }
         return secret
     }
 
-    func deleteSecret(for alias: String) throws {
-        events.append(.delete(alias))
+    func deleteSecret(for identity: SecretIdentity) throws {
+        events.append(.delete(identity))
     }
 }

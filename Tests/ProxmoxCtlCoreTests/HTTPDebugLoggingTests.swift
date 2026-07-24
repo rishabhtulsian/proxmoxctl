@@ -34,6 +34,33 @@ final class HTTPDebugLoggingTests: XCTestCase {
         XCTAssertTrue(output.contains(#"< Body: {"errors":"permission denied"}"#))
     }
 
+    func testRequestLogRedactsSecretsContainingDelimiterCharacters() throws {
+        for secret in ["part1=part2", "part1=part2=part3"] {
+            var request = URLRequest(url: try XCTUnwrap(URL(string: "https://example.test:8006/api2/json/nodes")))
+            request.setValue(
+                "PVEAPIToken=admin@pve!cli=\(secret)",
+                forHTTPHeaderField: "Authorization"
+            )
+
+            let output = HTTPDebugFormatter.formatRequest(request)
+
+            XCTAssertTrue(output.contains("> Authorization: PVEAPIToken=admin@pve!cli=<redacted>"))
+            for component in secret.split(separator: "=") {
+                XCTAssertFalse(output.contains(component))
+            }
+        }
+    }
+
+    func testRequestLogFullyRedactsUnrecognizedAuthorizationFormat() throws {
+        var request = URLRequest(url: try XCTUnwrap(URL(string: "https://example.test:8006/api2/json/nodes")))
+        request.setValue("Bearer sensitive-value", forHTTPHeaderField: "Authorization")
+
+        let output = HTTPDebugFormatter.formatRequest(request)
+
+        XCTAssertTrue(output.contains("> Authorization: <redacted>"))
+        XCTAssertFalse(output.contains("sensitive-value"))
+    }
+
     func testClientLogsRequestAndUnauthorizedResponse() async throws {
         let transport = RecordingDebugTransport(data: #"{"errors":"permission denied"}"#, statusCode: 401)
         let logger = BufferingHTTPDebugLogger()

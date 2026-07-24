@@ -28,6 +28,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
 The script builds with SwiftPM, resolves the debug binary path, and runs the CLI.
+It never uses process-name-wide termination. Foreground mode returns the CLI
+status; logs and telemetry modes track only their own child PIDs and clean those
+up on exit or interruption.
 
 To smoke-test timeout persistence without contacting a Proxmox host:
 
@@ -52,6 +55,7 @@ piped interactive smoke tests.
 ## Test Categories
 
 - Config and credential normalization.
+- Config-scoped credential identity and failure-safe host coordination.
 - Keychain and authorization abstractions.
 - Proxmox endpoint construction and HTTP response handling.
 - API token Authorization headers.
@@ -59,11 +63,23 @@ piped interactive smoke tests.
 - QEMU/LXC guest status and lifecycle behavior.
 - Single-node inference and multi-node errors.
 - JSON/table rendering.
-- Confirmation policy for disruptive commands.
+- Confirmation policy and preflight ordering for every lifecycle command.
+- Guest-list availability planning for online, offline, and explicit nodes.
 - Interactive parser, loop behavior, session cache, and history policy.
 - API timeout defaulting, validation, persistence, and request propagation.
 - Built-CLI `config set-timeout` behavior through
   `script/test_config_timeout.sh`.
+- Root/leaf/interactive global options and built help through
+  `script/test_global_options.sh`.
+- Non-mutating lifecycle command smoke coverage through
+  `script/test_lifecycle_confirmation.sh`.
+- Helper process ownership and exit propagation through
+  `script/test_build_helper_process_ownership.sh`.
+
+`./script/build_and_run.sh --verify` runs all four shell integration suites.
+Both CI workflows invoke that helper, so these checks run on `macos-26` and the
+scheduled `macos-latest` drift job without Keychain access, secrets, live hosts,
+or lifecycle POSTs.
 
 Add focused tests for each behavior change. Prefer fake transports and stores
 over live Proxmox calls.

@@ -12,7 +12,7 @@ The CLI currently supports:
 - Listing nodes and guests.
 - Inspecting QEMU VM and LXC guest status.
 - Starting, shutting down, stopping, rebooting, suspending, and resuming guests
-  with safety prompts for disruptive operations.
+  with confirmation for every lifecycle mutation.
 - Interactive mode with in-memory session caching, up/down command history, and
   Ctrl-R reverse search.
 - Verbose HTTP request/response logging with token secrets redacted.
@@ -83,15 +83,33 @@ printf '%s\n' "$PVE_TOKEN_SECRET" | proxmoxctl host add home1 \
   --token-secret-stdin
 ```
 
+Aliases must be non-empty, contain no control characters, and have no leading
+or trailing whitespace. Base URLs must be absolute HTTPS URLs with a host and
+optional port; credentials, paths, queries, and fragments are rejected.
+
+Adding an existing alias is rejected before the secret is read. Replace it
+explicitly with `--replace`:
+
+```bash
+proxmoxctl host add home1 --replace \
+  --url https://new-pve.example.test:8006 \
+  --token-id 'admin@pve!replacement'
+```
+
 Configuration is stored as JSON at:
 
 ```text
 ~/.config/proxmoxctl/config.json
 ```
 
-The config stores aliases, URLs, token IDs, the default host, and the global
-`apiTimeoutSeconds` value. Token secrets are stored separately in the macOS
-Keychain.
+The config stores aliases, URLs, token IDs, non-secret credential references,
+the default host, and the global `apiTimeoutSeconds` value. Token secrets are
+stored separately in the macOS Keychain under config-scoped identities.
+
+Legacy alias-based credentials continue to work with the default config. A
+legacy host in a custom `--config` is intentionally treated as ambiguous;
+re-enroll it with `host add <alias> --replace` so the CLI does not claim a
+credential belonging to another config.
 
 Set the application-wide Proxmox API timeout with:
 
@@ -132,6 +150,17 @@ proxmoxctl guest status 200 --json
 
 Use `--host <alias>` to target a non-default configured host.
 
+`--config`, `--verbose`, and `-v` work before the root subcommand or in their
+existing leaf positions:
+
+```bash
+proxmoxctl --config ./lab.json --verbose nodes
+proxmoxctl nodes --config ./lab.json -v
+```
+
+Equivalent duplicate config paths are accepted. Different config paths in one
+invocation are rejected as a conflict.
+
 ## Guest Lifecycle Commands
 
 Examples:
@@ -149,8 +178,14 @@ When guest type is omitted, `proxmoxctl` resolves QEMU vs LXC by checking cluste
 inventory first, then probing QEMU and LXC status endpoints. This avoids calling
 the wrong lifecycle endpoint for a VMID.
 
-Disruptive operations require confirmation unless `--yes` is passed. In
-non-interactive standard input, disruptive operations require `--yes`.
+Every lifecycle operation requires confirmation unless `--yes` is passed. In
+non-interactive standard input, every lifecycle operation requires `--yes`.
+Target and guest type resolution happen before confirmation; the lifecycle POST
+is sent only after support validation and approval.
+
+Without `--node`, `guests` queries online nodes and reports an availability error
+when none are online. Supplying `--node` queries that node directly. Successfully
+querying online nodes that contain no guests remains a valid empty result.
 
 ## Interactive Mode
 
@@ -200,6 +235,10 @@ Authorization headers are redacted as:
 ```text
 PVEAPIToken=admin@pve!cli=<redacted>
 ```
+
+Redaction splits at the first secret delimiter. If a Proxmox token ID cannot be
+recognized safely, the complete Authorization value is replaced with
+`<redacted>`.
 
 Do not paste verbose logs publicly without reviewing hostnames, node names, VM
 names, and response bodies.

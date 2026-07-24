@@ -2,78 +2,82 @@
 import XCTest
 
 final class SessionCacheTests: XCTestCase {
-    func testCachingSecretStoreLoadsSecretOncePerAlias() throws {
-        let base = RecordingSessionSecretStore(secrets: ["home": "secret-token"])
+    func testCachingSecretStoreLoadsSecretOncePerIdentity() throws {
+        let identity = SecretIdentity(account: "v2:scope:one", alias: "home")
+        let base = RecordingSessionSecretStore(secrets: [identity: "secret-token"])
         let cache = SessionCache()
         let store = CachingSecretStore(base: base, cache: cache)
 
-        let first = try store.loadSecret(for: "home", reason: "Access token")
-        let second = try store.loadSecret(for: "home", reason: "Access token")
+        let first = try store.loadSecret(for: identity, reason: "Access token")
+        let second = try store.loadSecret(for: identity, reason: "Access token")
 
         XCTAssertEqual(first, "secret-token")
         XCTAssertEqual(second, "secret-token")
-        XCTAssertEqual(base.events, [.load("home")])
+        XCTAssertEqual(base.events, [.load(identity)])
     }
 
-    func testCachingSecretStoreKeepsAliasesIndependent() throws {
+    func testCachingSecretStoreKeepsSameAliasInDifferentConfigScopesIndependent() throws {
+        let firstIdentity = SecretIdentity(account: "v2:scope-one:ref", alias: "home")
+        let secondIdentity = SecretIdentity(account: "v2:scope-two:ref", alias: "home")
         let base = RecordingSessionSecretStore(secrets: [
-            "home1": "secret-one",
-            "home2": "secret-two"
+            firstIdentity: "secret-one",
+            secondIdentity: "secret-two"
         ])
         let cache = SessionCache()
         let store = CachingSecretStore(base: base, cache: cache)
 
-        XCTAssertEqual(try store.loadSecret(for: "home1", reason: "Access token"), "secret-one")
-        XCTAssertEqual(try store.loadSecret(for: "home2", reason: "Access token"), "secret-two")
-        XCTAssertEqual(try store.loadSecret(for: "home1", reason: "Access token"), "secret-one")
+        XCTAssertEqual(try store.loadSecret(for: firstIdentity, reason: "Access token"), "secret-one")
+        XCTAssertEqual(try store.loadSecret(for: secondIdentity, reason: "Access token"), "secret-two")
+        XCTAssertEqual(try store.loadSecret(for: firstIdentity, reason: "Access token"), "secret-one")
 
-        XCTAssertEqual(base.events, [.load("home1"), .load("home2")])
+        XCTAssertEqual(base.events, [.load(firstIdentity), .load(secondIdentity)])
     }
 
     func testCachingSecretStoreSaveAndDeleteUpdateCache() throws {
-        let base = RecordingSessionSecretStore(secrets: ["home": "old-secret"])
+        let identity = SecretIdentity(account: "v2:scope:ref", alias: "home")
+        let base = RecordingSessionSecretStore(secrets: [identity: "old-secret"])
         let cache = SessionCache()
         let store = CachingSecretStore(base: base, cache: cache)
 
-        XCTAssertEqual(try store.loadSecret(for: "home", reason: "Access token"), "old-secret")
-        try store.saveSecret("new-secret", for: "home")
-        XCTAssertEqual(try store.loadSecret(for: "home", reason: "Access token"), "new-secret")
-        try store.deleteSecret(for: "home")
+        XCTAssertEqual(try store.loadSecret(for: identity, reason: "Access token"), "old-secret")
+        try store.saveSecret("new-secret", for: identity)
+        XCTAssertEqual(try store.loadSecret(for: identity, reason: "Access token"), "new-secret")
+        try store.deleteSecret(for: identity)
 
-        XCTAssertNil(cache.secret(for: "home"))
-        XCTAssertEqual(base.events, [.load("home"), .save("home", "new-secret"), .delete("home")])
+        XCTAssertNil(cache.secret(for: identity))
+        XCTAssertEqual(base.events, [.load(identity), .save(identity, "new-secret"), .delete(identity)])
     }
 }
 
 private final class RecordingSessionSecretStore: SecretStore {
     enum Event: Equatable {
-        case save(String, String)
-        case load(String)
-        case delete(String)
+        case save(SecretIdentity, String)
+        case load(SecretIdentity)
+        case delete(SecretIdentity)
     }
 
     var events: [Event] = []
-    private var secrets: [String: String]
+    private var secrets: [SecretIdentity: String]
 
-    init(secrets: [String: String]) {
+    init(secrets: [SecretIdentity: String]) {
         self.secrets = secrets
     }
 
-    func saveSecret(_ secret: String, for alias: String) throws {
-        events.append(.save(alias, secret))
-        secrets[alias] = secret
+    func saveSecret(_ secret: String, for identity: SecretIdentity) throws {
+        events.append(.save(identity, secret))
+        secrets[identity] = secret
     }
 
-    func loadSecret(for alias: String, reason: String) throws -> String {
-        events.append(.load(alias))
-        guard let secret = secrets[alias] else {
-            throw ProxmoxCtlError.secretMissing(alias)
+    func loadSecret(for identity: SecretIdentity, reason: String) throws -> String {
+        events.append(.load(identity))
+        guard let secret = secrets[identity] else {
+            throw ProxmoxCtlError.secretMissing(identity.alias)
         }
         return secret
     }
 
-    func deleteSecret(for alias: String) throws {
-        events.append(.delete(alias))
-        secrets.removeValue(forKey: alias)
+    func deleteSecret(for identity: SecretIdentity) throws {
+        events.append(.delete(identity))
+        secrets.removeValue(forKey: identity)
     }
 }

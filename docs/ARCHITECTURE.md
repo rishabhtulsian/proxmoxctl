@@ -6,8 +6,9 @@ thin executable target.
 ## Package Layout
 
 - `ProxmoxCtlCore`: configuration, credential normalization, Keychain
-  abstractions, Proxmox API client, output rendering, interactive parsing, and
-  testable runtime support.
+  abstractions, failure-safe host coordination, guest/lifecycle planning,
+  Proxmox API client, output rendering, interactive parsing, and testable
+  runtime support.
 - `proxmoxctl`: ArgumentParser command tree, runtime wiring, terminal input,
   confirmation prompts, and command execution.
 - `CEditLine`: system library target for macOS readline/libedit headers and
@@ -18,11 +19,14 @@ thin executable target.
 ## Runtime Flow
 
 1. ArgumentParser parses the selected command.
-2. Global options resolve the config path and verbose logging flag.
+2. Root and leaf global options resolve to one config path and verbosity value;
+   conflicting config paths fail before runtime construction.
 3. The runtime loads host config from `FileConfigStore`.
 4. The selected host alias resolves to a URL and token ID.
-5. The token secret is loaded through `AuthorizingSecretStore`, which authorizes
-   through LocalAuthentication before reading Keychain.
+5. The host's opaque credential reference and canonical config identity resolve
+   a `SecretIdentity`. The token secret is loaded through
+   `AuthorizingSecretStore`, which authorizes through LocalAuthentication before
+   reading Keychain.
 6. The runtime passes the effective global API timeout to `ProxmoxClient`;
    missing values use the 5-second default.
 7. `ProxmoxClient` builds `/api2/json/...` requests, assigns the timeout to
@@ -45,11 +49,24 @@ The config contains:
 - Schema version.
 - Default host alias.
 - Host aliases, base URLs, and API token IDs.
+- Optional non-secret credential references.
 - Global API timeout in seconds.
 
 Token secrets are not written to the config file. They are stored in the macOS
-Keychain by alias. Keychain reads and writes are wrapped by
-`AuthorizingSecretStore`, which requests Touch ID or passcode authorization.
+Keychain under `v2:<config-path-sha256>:<opaque-reference>` accounts. The default
+config can still resolve older alias accounts; custom configs reject ambiguous
+legacy records and require explicit re-enrollment.
+
+`HostCredentialCoordinator` stages a new secret before atomically committing a
+new or replacement reference. A failed config write rolls back the staged
+secret. Replacement and removal commit config first, then clean up the
+superseded account. Cleanup failure is a warning because the committed config
+still points to the valid active secret.
+
+`FileConfigStore` validates decoded and outgoing config. Aliases reject empty,
+control-character, and surrounding-whitespace forms; host URLs require HTTPS,
+a host, and no credentials, query, fragment, or non-root path; explicit timeout
+values must be finite and positive.
 
 ## Proxmox API Client
 
@@ -67,6 +84,10 @@ Guest status and lifecycle commands resolve QEMU vs LXC automatically when type
 is omitted. The client checks cluster inventory first and falls back to endpoint
 probing when inventory is unavailable or incomplete.
 
+`GuestListPlanner` distinguishes no-online-node availability from a successful
+empty guest inventory. `LifecyclePreflight` orders node resolution, type
+resolution, support validation, confirmation, and only then the lifecycle POST.
+
 ## Interactive Runtime
 
 `proxmoxctl interactive` runs normal proxmoxctl commands inside one process. It
@@ -74,7 +95,7 @@ uses an `InteractiveRuntimeSession` with a `SessionCache` shared across commands
 
 The cache is process-local and stores:
 
-- API token secrets by host alias.
+- API token secrets by `SecretIdentity`.
 - Node lists by host alias.
 
 `cache clear` clears both. `host remove <alias>` invalidates that alias. No
@@ -94,6 +115,10 @@ Non-TTY input falls back to plain Swift `readLine()` for piped smoke tests.
 - `ProxmoxTransport` makes network behavior testable without live Proxmox.
 - `SecretStore` and `Authorizer` abstractions avoid touching real Keychain or
   LocalAuthentication in tests.
+- `ConfigStore` plus fake secret stores exercise staged commit and cleanup
+  failures without persistent mutation.
+- `GuestListPlanner` and `LifecyclePreflight` make availability and mutation
+  ordering testable without live hosts.
 - `InteractiveLineReader` lets tests exercise REPL control flow without terminal
   control.
 - Renderers produce deterministic JSON and table output for assertions.
